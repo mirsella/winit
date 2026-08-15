@@ -10,7 +10,9 @@
 use std::marker::PhantomData;
 #[cfg(any(x11_platform, wayland_platform))]
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(not(android_platform))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{error, fmt};
 
 #[cfg(not(web_platform))]
@@ -66,6 +68,7 @@ pub struct EventLoopBuilder<T: 'static> {
     _p: PhantomData<T>,
 }
 
+#[cfg(not(android_platform))]
 static EVENT_LOOP_CREATED: AtomicBool = AtomicBool::new(false);
 
 impl EventLoopBuilder<()> {
@@ -115,6 +118,7 @@ impl<T> EventLoopBuilder<T> {
     pub fn build(&mut self) -> Result<EventLoop<T>, EventLoopError> {
         let _span = tracing::debug_span!("winit::EventLoopBuilder::build").entered();
 
+        #[cfg(not(android_platform))]
         if EVENT_LOOP_CREATED.swap(true, Ordering::Relaxed) {
             return Err(EventLoopError::RecreationAttempt);
         }

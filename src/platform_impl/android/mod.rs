@@ -138,8 +138,9 @@ pub struct EventLoop<T: 'static> {
     user_events_sender: mpsc::Sender<T>,
     user_events_receiver: PeekableReceiver<T>, // must wake looper whenever something gets sent
     loop_running: bool,                        // Dispatched `NewEvents<Init>`
-    running: bool,
+    window_has_surface: bool,
     pending_redraw: bool,
+    scale_factor: f64,
     cause: StartCause,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
@@ -187,8 +188,9 @@ impl<T: 'static> EventLoop<T> {
             user_events_sender,
             user_events_receiver: PeekableReceiver::from_recv(user_events_receiver),
             loop_running: false,
-            running: false,
+            window_has_surface: false,
             pending_redraw: false,
+            scale_factor: MonitorHandle::new(android_app.clone()).scale_factor(),
             cause: StartCause::Init,
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
@@ -202,7 +204,6 @@ impl<T: 'static> EventLoop<T> {
         trace!("Mainloop iteration");
 
         let cause = self.cause;
-        let mut pending_redraw = self.pending_redraw;
         let mut resized = false;
 
         callback(event::Event::NewEvents(cause), self.window_target());
@@ -212,13 +213,21 @@ impl<T: 'static> EventLoop<T> {
 
             match event {
                 MainEvent::InitWindow { .. } => {
+                    self.window_has_surface = true;
                     callback(event::Event::Resumed, self.window_target());
                 },
                 MainEvent::TerminateWindow { .. } => {
                     callback(event::Event::Suspended, self.window_target());
+                    self.window_has_surface = false;
                 },
-                MainEvent::WindowResized { .. } => resized = true,
-                MainEvent::RedrawNeeded { .. } => pending_redraw = true,
+                MainEvent::WindowResized { .. } => {
+                    assert!(self.window_has_surface);
+                    resized = true;
+                },
+                MainEvent::RedrawNeeded { .. } => {
+                    assert!(self.window_has_surface);
+                    self.pending_redraw = true;
+                },
                 MainEvent::ContentRectChanged { .. } => {
                     warn!("TODO: find a way to notify application of content rect change");
                 },
@@ -244,12 +253,14 @@ impl<T: 'static> EventLoop<T> {
                 },
                 MainEvent::ConfigChanged { .. } => {
                     let monitor = MonitorHandle::new(self.android_app.clone());
-                    let old_scale_factor = monitor.scale_factor();
                     let scale_factor = monitor.scale_factor();
-                    if (scale_factor - old_scale_factor).abs() < f64::EPSILON {
-                        let new_inner_size = Arc::new(Mutex::new(
-                            MonitorHandle::new(self.android_app.clone()).size(),
-                        ));
+                    #[expect(
+                        clippy::float_cmp,
+                        reason = "Android scale factors derive from integer density values"
+                    )]
+                    if scale_factor != self.scale_factor {
+                        self.scale_factor = scale_factor;
+                        let new_inner_size = Arc::new(Mutex::new(monitor.size()));
                         let event = event::Event::WindowEvent {
                             window_id: window::WindowId(WindowId),
                             event: event::WindowEvent::ScaleFactorChanged {
@@ -269,27 +280,20 @@ impl<T: 'static> EventLoop<T> {
                     // XXX: how to forward this state to applications?
                     warn!("TODO: forward onStart notification to application");
                 },
-                MainEvent::Resume { .. } => {
-                    debug!("App Resumed - is running");
-                    self.running = true;
-                },
+                MainEvent::Resume { .. } | MainEvent::Pause => {},
                 MainEvent::SaveState { .. } => {
                     // XXX: how to forward this state to applications?
                     // XXX: also how do we expose state restoration to apps?
                     warn!("TODO: forward saveState notification to application");
-                },
-                MainEvent::Pause => {
-                    debug!("App Paused - stopped running");
-                    self.running = false;
                 },
                 MainEvent::Stop => {
                     // XXX: how to forward this state to applications?
                     warn!("TODO: forward onStop notification to application");
                 },
                 MainEvent::Destroy => {
-                    // XXX: maybe exit mainloop to drop things before being
-                    // killed by the OS?
-                    warn!("TODO: forward onDestroy notification to application");
+                    debug!("Android Activity destroyed; exiting event loop");
+                    self.window_target().exit();
+                    return;
                 },
                 MainEvent::InsetsChanged { .. } => {
                     // XXX: how to forward this state to applications?
@@ -329,15 +333,12 @@ impl<T: 'static> EventLoop<T> {
             }
         }
 
-        if self.running {
+        if self.window_has_surface {
             if resized {
-                let size = if let Some(native_window) = self.android_app.native_window().as_ref() {
-                    let width = native_window.width() as _;
-                    let height = native_window.height() as _;
-                    PhysicalSize::new(width, height)
-                } else {
-                    PhysicalSize::new(0, 0)
-                };
+                let native_window =
+                    self.android_app.native_window().expect("missing native window");
+                let size =
+                    PhysicalSize::new(native_window.width() as _, native_window.height() as _);
                 let event = event::Event::WindowEvent {
                     window_id: window::WindowId(WindowId),
                     event: event::WindowEvent::Resized(size),
@@ -345,9 +346,8 @@ impl<T: 'static> EventLoop<T> {
                 callback(event, self.window_target());
             }
 
-            pending_redraw |= self.redraw_flag.get_and_reset();
-            if pending_redraw {
-                pending_redraw = false;
+            self.pending_redraw |= self.redraw_flag.get_and_reset();
+            if std::mem::take(&mut self.pending_redraw) {
                 let event = event::Event::WindowEvent {
                     window_id: window::WindowId(WindowId),
                     event: event::WindowEvent::RedrawRequested,
@@ -358,8 +358,6 @@ impl<T: 'static> EventLoop<T> {
 
         // This is always the last event we dispatch before poll again
         callback(event::Event::AboutToWait, self.window_target());
-
-        self.pending_redraw = pending_redraw;
     }
 
     fn handle_input_event<F>(
@@ -540,7 +538,7 @@ impl<T: 'static> EventLoop<T> {
         }
     }
 
-    fn poll_events_with_timeout<F>(&mut self, mut timeout: Option<Duration>, mut callback: F)
+    fn poll_events_with_timeout<F>(&mut self, timeout: Option<Duration>, mut callback: F)
     where
         F: FnMut(event::Event<T>, &RootAEL),
     {
@@ -548,21 +546,22 @@ impl<T: 'static> EventLoop<T> {
 
         self.pending_redraw |= self.redraw_flag.get_and_reset();
 
-        timeout =
-            if self.running && (self.pending_redraw || self.user_events_receiver.has_incoming()) {
-                // If we already have work to do then we don't want to block on the next poll
-                Some(Duration::ZERO)
-            } else {
-                let control_flow_timeout = match self.control_flow() {
-                    ControlFlow::Wait => None,
-                    ControlFlow::Poll => Some(Duration::ZERO),
-                    ControlFlow::WaitUntil(wait_deadline) => {
-                        Some(wait_deadline.saturating_duration_since(start))
-                    },
-                };
-
-                min_timeout(control_flow_timeout, timeout)
+        let timeout = if (self.window_has_surface && self.pending_redraw)
+            || self.user_events_receiver.has_incoming()
+        {
+            // If we already have work to do then we don't want to block on the next poll
+            Some(Duration::ZERO)
+        } else {
+            let control_flow_timeout = match self.control_flow() {
+                ControlFlow::Wait => None,
+                ControlFlow::Poll => Some(Duration::ZERO),
+                ControlFlow::WaitUntil(wait_deadline) => {
+                    Some(wait_deadline.saturating_duration_since(start))
+                },
             };
+
+            min_timeout(control_flow_timeout, timeout)
+        };
 
         let app = self.android_app.clone(); // Don't borrow self as part of poll expression
         app.poll_events(timeout, |poll_event| {
@@ -577,10 +576,10 @@ impl<T: 'static> EventLoop<T> {
                     //
                     // For now, user_events and redraw_requests are the only reasons to expect
                     // a wake up here so we can ignore the wake up if there are no events/requests.
-                    // We also ignore wake ups while suspended.
+                    // Redraw wakeups require a surface, but user events remain valid without one.
                     self.pending_redraw |= self.redraw_flag.get_and_reset();
-                    if !self.running
-                        || (!self.pending_redraw && !self.user_events_receiver.has_incoming())
+                    if !(self.window_has_surface && self.pending_redraw)
+                        && !self.user_events_receiver.has_incoming()
                     {
                         return;
                     }
