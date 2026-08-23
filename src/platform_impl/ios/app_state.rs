@@ -215,6 +215,12 @@ impl AppState {
         matches!(self.state(), AppStateImpl::Terminated)
     }
 
+    fn control_flow_observers_suppressed(&self) -> bool {
+        // Common-mode observers also run in nested UIKit loops. Do not re-enter Winit while the
+        // outer loop is dispatching an application callback.
+        matches!(self.state(), AppStateImpl::InUserCallback { .. })
+    }
+
     fn will_launch_transition(&mut self, queued_handler: EventLoopHandler) {
         let (queued_windows, queued_events, queued_gpu_redraws) = match self.take_state() {
             AppStateImpl::NotLaunched { queued_windows, queued_events, queued_gpu_redraws } => {
@@ -509,6 +515,9 @@ pub fn did_finish_launching(mtm: MainThreadMarker) {
 // AppState::did_finish_launching handles the special transition `Init`
 pub fn handle_wakeup_transition(mtm: MainThreadMarker) {
     let mut this = AppState::get_mut(mtm);
+    if this.control_flow_observers_suppressed() {
+        return;
+    }
     let wakeup_event = match this.wakeup_transition() {
         None => return,
         Some(wakeup_event) => wakeup_event,
@@ -689,6 +698,9 @@ pub(crate) fn send_occluded_event_for_all_windows(application: &UIApplication, o
 
 pub fn handle_main_events_cleared(mtm: MainThreadMarker) {
     let mut this = AppState::get_mut(mtm);
+    if this.control_flow_observers_suppressed() {
+        return;
+    }
     if !this.has_launched() || this.has_terminated() {
         return;
     }
@@ -718,7 +730,10 @@ pub fn handle_main_events_cleared(mtm: MainThreadMarker) {
 }
 
 pub fn handle_events_cleared(mtm: MainThreadMarker) {
-    AppState::get_mut(mtm).events_cleared_transition();
+    let mut this = AppState::get_mut(mtm);
+    if !this.control_flow_observers_suppressed() {
+        this.events_cleared_transition();
+    }
 }
 
 pub(crate) fn terminated(application: &UIApplication) {
