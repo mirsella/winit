@@ -364,8 +364,13 @@ impl<T> Drop for EventLoopProxy<T> {
 impl<T> EventLoopProxy<T> {
     fn new(sender: Sender<T>) -> EventLoopProxy<T> {
         unsafe {
-            // just wake up the eventloop
-            extern "C" fn event_loop_proxy_handler(_: *const c_void) {}
+            extern "C" fn event_loop_proxy_handler(_: *const c_void) {
+                let mtm = MainThreadMarker::new().unwrap();
+                app_state::handle_nonuser_event(
+                    mtm,
+                    EventWrapper::StaticEvent(Event::UserEvent(HandlePendingUserEvents)),
+                );
+            }
 
             // adding a Source to the main CFRunLoop lets us wake it up and
             // process user events through the normal OS EventLoop mechanisms.
