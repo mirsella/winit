@@ -191,7 +191,7 @@ impl<T: 'static> EventLoop<T> {
             // `applicationDidBecomeActive:`
             unsafe { UIApplicationDidBecomeActiveNotification },
             move |_| {
-                app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Resumed));
+                app_state::did_become_active(mtm);
             },
         );
         let _will_resign_active_observer = create_observer(
@@ -199,7 +199,7 @@ impl<T: 'static> EventLoop<T> {
             // `applicationWillResignActive:`
             unsafe { UIApplicationWillResignActiveNotification },
             move |_| {
-                app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Suspended));
+                app_state::will_resign_active(mtm);
             },
         );
         let _will_enter_foreground_observer = create_observer(
