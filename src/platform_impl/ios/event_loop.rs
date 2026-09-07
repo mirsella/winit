@@ -92,7 +92,7 @@ impl ActiveEventLoop {
     }
 
     pub(crate) fn exiting(&self) -> bool {
-        false
+        AppState::get_mut(self.mtm).is_terminating()
     }
 
     pub(crate) fn owned_display_handle(&self) -> OwnedDisplayHandle {
@@ -128,6 +128,9 @@ fn map_user_event<T: 'static>(
         Err(_) => {
             for event in receiver.try_iter() {
                 (handler)(Event::UserEvent(event), window_target);
+                if window_target.exiting() {
+                    break;
+                }
             }
         },
     }
